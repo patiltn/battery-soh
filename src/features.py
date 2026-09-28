@@ -260,6 +260,16 @@ def cell_features(cycles: dict, summary: dict,
     # capacity trend over the early window (slope, not level)
     mask = summary["cycle"] <= late
     cyc, qd = summary["cycle"][mask], summary["QD"][mask]
+
+    # Drop non-positive capacities before fitting.  Batch 1 of the Severson
+    # data records a zero as its first summary entry (batches 2 and 3 do not),
+    # which makes Q_ratio infinite and drags the slope fit through a point
+    # that is an artefact rather than a measurement.  Because batch membership
+    # correlates with charging policy and hence with cycle life, leaving it in
+    # lets a model learn WHICH BATCH a cell came from instead of how it ages.
+    good = np.isfinite(qd) & (qd > 0)
+    cyc, qd = cyc[good], qd[good]
+
     if cyc.size >= 3:
         feats["Q_slope_early"] = float(np.polyfit(cyc, qd, 1)[0])
         feats["Q_at_late"] = float(qd[-1])

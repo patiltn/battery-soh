@@ -241,6 +241,20 @@ def cache_features(raw_dir: str | os.PathLike = "data/raw",
 
     names = sorted({k for r in rows for k in r})
     X = np.array([[r.get(n, np.nan) for n in names] for r in rows])
+
+    # Drop features that are NaN for EVERY cell.  On this dataset that is the
+    # second incremental-capacity peak (IC1_*, dIC1_*): at the 4C discharge
+    # rate used here, polarisation smears the LFP plateaus together so only
+    # one peak is resolved.  The feature is not missing, it is absent -- there
+    # is no second peak to measure -- so imputing a value would be inventing
+    # data. Columns are dropped rather than filled, and the names are printed
+    # so the loss is visible rather than silent.
+    all_nan = np.isnan(X).all(axis=0)
+    if all_nan.any():
+        dropped = [n for n, d in zip(names, all_nan) if d]
+        print(f"[cache_features] dropping all-NaN features: {', '.join(dropped)}")
+        X = X[:, ~all_nan]
+        names = [n for n, d in zip(names, all_nan) if not d]
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out_path, X=X, y=np.array(lives, dtype=float),
