@@ -44,14 +44,29 @@ V_GRID = np.linspace(3.5, 2.0, 1000)
 # --------------------------------------------------------------------------
 # Curve construction
 # --------------------------------------------------------------------------
-def q_of_v(V: np.ndarray, Q: np.ndarray, v_grid: np.ndarray = V_GRID) -> np.ndarray:
+def q_of_v(V: np.ndarray, Q: np.ndarray, v_grid: np.ndarray = V_GRID,
+           I: np.ndarray | None = None,
+           discharge_threshold: float = -0.1) -> np.ndarray:
     """Interpolate discharge capacity onto a fixed voltage grid -> Q(V).
 
-    V must be monotonically decreasing over the discharge (it is, apart from
-    noise); we enforce monotonicity by sorting, then interpolate.  Points
-    outside the measured voltage span are NaN rather than extrapolated --
-    extrapolating here silently invents capacity.
+    If the current `I` is supplied, only samples with I < `discharge_threshold`
+    are used.  This matters: a raw cycle record covers charge AND discharge,
+    and the two branches sit at different voltages for the same capacity
+    (hysteresis plus the IR drop, which reverses sign with the current).
+    Interpolating over both blends them into a curve that is neither, biased
+    by however many samples each branch happens to contribute.  Checked
+    against the published `Qdlin` on batch 2, masking cut the maximum
+    disagreement from 0.057 Ah to 0.035 Ah, the remainder being endpoint
+    handling at the edges of the voltage grid.
+
+    Points outside the measured voltage span are NaN rather than
+    extrapolated -- extrapolating here silently invents capacity, and the
+    grid edges are exactly where implementations disagree most.
     """
+    if I is not None:
+        mask = np.asarray(I) < discharge_threshold
+        if mask.sum() >= 20:          # ignore a mask that would leave nothing
+            V, Q = V[mask], Q[mask]
     order = np.argsort(V)
     v_s, q_s = V[order], Q[order]
     keep = np.concatenate([[True], np.diff(v_s) > 1e-9])   # strictly increasing
@@ -79,7 +94,7 @@ def delta_q(q_late: np.ndarray, q_early: np.ndarray) -> np.ndarray:
 
 
 def dqdv(V: np.ndarray, Q: np.ndarray, v_grid: np.ndarray = V_GRID,
-         smooth: float = 8.0) -> np.ndarray:
+         smooth: float = 8.0, I: np.ndarray | None = None) -> np.ndarray:
     """Incremental capacity dQ/dV on the voltage grid.
 
     Differentiating measured data amplifies noise as 1/dV, so smoothing is not
@@ -87,7 +102,7 @@ def dqdv(V: np.ndarray, Q: np.ndarray, v_grid: np.ndarray = V_GRID,
     smoothing in the voltage domain is applied BEFORE differencing; `smooth`
     is the kernel width in grid points.
     """
-    q = q_of_v(V, Q, v_grid)
+    q = q_of_v(V, Q, v_grid, I=I)
     valid = ~np.isnan(q)
     if valid.sum() < 20:
         return np.full_like(v_grid, np.nan)
@@ -217,16 +232,19 @@ def cell_features(cycles: dict, summary: dict,
     c_early = int(avail[np.argmin(np.abs(avail - early))])
     c_late = int(avail[-1])
 
-    q_e = q_of_v(cycles[c_early]["V"], cycles[c_early]["Qd"])
-    q_l = q_of_v(cycles[c_late]["V"], cycles[c_late]["Qd"])
+    q_e = q_of_v(cycles[c_early]["V"], cycles[c_early]["Qd"],
+                 I=cycles[c_early].get("I"))
+    q_l = q_of_v(cycles[c_late]["V"], cycles[c_late]["Qd"],
+                 I=cycles[c_late].get("I"))
 
     feats: dict[str, float] = {}
     feats |= delta_q_features(delta_q(q_l, q_e))
-    feats |= ic_peak_features(dqdv(cycles[c_late]["V"], cycles[c_late]["Qd"]))
+    feats |= ic_peak_features(dqdv(cycles[c_late]["V"], cycles[c_late]["Qd"],
+                                   I=cycles[c_late].get("I")))
 
     # incremental-capacity drift between the same two cycles
-    ic_e = ic_peak_features(dqdv(cycles[c_early]["V"], cycles[c_early]["Qd"]),
-                            prefix="ICe")
+    ic_e = ic_peak_features(dqdv(cycles[c_early]["V"], cycles[c_early]["Qd"],
+                                 I=cycles[c_early].get("I")), prefix="ICe")
     for i in range(2):
         for k in ("v", "h", "w"):
             feats[f"dIC{i}_{k}"] = feats.get(f"IC{i}_{k}", np.nan) - ic_e.get(f"ICe{i}_{k}", np.nan)
